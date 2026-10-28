@@ -150,6 +150,16 @@ test('transcript fails the step when a non-Haiku model was billed', () => {
   assert.deepEqual(readJson(join(repo.root, 'agent.json')).models, ['claude-sonnet-5-5'])
 })
 
+test('transcript fails the step when the agent did not finish', () => {
+  const repo = createRepo({ 'README.md': 'readme\n' })
+  const transcript = join(repo.root, 'transcript.jsonl')
+  writeFileSync(transcript, '')
+  const result = run(repo.root, ['transcript', '--input', transcript, '--exit-code', '1', '--out', join(repo.root, 'agent.json')])
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /The agent did not finish: missing \(exit code 1\)/)
+  assert.equal(readJson(join(repo.root, 'agent.json')).status, 'missing')
+})
+
 test('verify-summary, status and report combine the job artifacts', () => {
   const repo = createRepo({ 'README.md': 'readme\n' })
   const artifacts = join(repo.root, 'artifacts')
