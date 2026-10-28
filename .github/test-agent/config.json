@@ -1,0 +1,43 @@
+{
+  "model": "claude-haiku-5-5",
+  "packages": {
+    "backend": {
+      "sourceGlobs": ["backend/src/**/*.ts"],
+      "ignoreGlobs": ["backend/src/**/types.ts", "backend/src/generated/**"],
+      "testGlobs": ["backend/tests/**/*.test.ts"],
+      "writableGlobs": ["backend/tests/**/*.ts"]
+    },
+    "frontend": {
+      "sourceGlobs": ["frontend/src/**/*.ts", "frontend/src/**/*.tsx"],
+      "ignoreGlobs": [
+        "frontend/src/main.tsx",
+        "frontend/src/test/**",
+        "frontend/src/**/*.test.ts",
+        "frontend/src/**/*.test.tsx",
+        "frontend/src/design-system/**",
+        "frontend/src/**/types.ts",
+        "frontend/src/**/*.types.ts",
+        "frontend/src/**/*.d.ts",
+        "frontend/src/**/index.ts",
+        "frontend/src/**/constants.ts",
+        "frontend/src/**/constants.tsx",
+        "frontend/src/**/*.constants.ts",
+        "frontend/src/features/todos/api/queryKeys.ts",
+        "frontend/src/lib/queryClient.ts"
+      ],
+      "testGlobs": ["frontend/src/**/*.test.ts", "frontend/src/**/*.test.tsx"],
+      "writableGlobs": [
+        "frontend/src/**/*.test.ts",
+        "frontend/src/**/*.test.tsx",
+        "frontend/src/test/**/*.ts",
+        "frontend/src/test/**/*.tsx"
+      ]
+    }
+  },
+  "limits": {
+    "pr": { "maxTargets": 8, "maxBudgetUsd": 1, "maxTurns": 60 },
+    "sweep": { "maxTargets": 12, "maxBudgetUsd": 3, "maxTurns": 150 },
+    "maxPatchFiles": 15,
+    "maxTestFileBytes": 60000
+  }
+}
