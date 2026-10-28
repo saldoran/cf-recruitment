@@ -99,6 +99,14 @@ test('explains why nothing was committed when tests fail or the guard rejects th
   assert.match(rejected, /backend\/src\/main\.ts: the agent may only change test files/)
 })
 
+test('shows a rule-skipped file once even when the agent also reports it', () => {
+  const skippedTypes = { file: 'backend/src/features/todos/types.ts', action: 'skip', reason: 'types only', testFiles: [] }
+  const agent = { ...passing.agent, report: { ...passing.agent.report, decisions: [...passing.agent.report.decisions, skippedTypes] } }
+  const body = renderReport({ manifest, results: { backend: { ...passing, agent } }, commit: { committed: false }, runUrl: 'u' })
+  assert.equal(body.match(/`backend\/src\/features\/todos\/types\.ts`/g).length, 1)
+  assert.match(body, /`backend\/src\/features\/todos\/types\.ts` \| skip \(rule\)/)
+})
+
 test('labels the coverage column for sweep runs', () => {
   const body = renderReport({ manifest: { ...manifest, mode: 'sweep' }, results: { backend: passing }, commit: { committed: false }, runUrl: 'u' })
   assert.match(body, /Target lines covered/)

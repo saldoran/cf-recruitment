@@ -92,7 +92,9 @@ function decisionCell({ action, testFiles = [] }) {
 
 function decisionsSection(name, entry, result) {
   const report = result?.agent?.report
-  const decisions = report?.decisions ?? []
+  // Files skipped by rule get their own row; the agent's opinion on them adds nothing.
+  const ruleSkipped = new Set(entry.skipped.map((skip) => skip.file))
+  const decisions = (report?.decisions ?? []).filter((decision) => !ruleSkipped.has(decision.file))
   const decided = new Set(decisions.map((decision) => decision.file))
   const rows = [
     ...decisions.map((decision) => `| ${code(decision.file)} | ${decisionCell(decision)} | ${sanitize(decision.reason, 300)} |`),
