@@ -1,0 +1,16 @@
+{
+  "name": "unit-test-agent-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pins the Claude Code CLI used by the unit-test agent workflow and runs the workflow script tests.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "test": "node --test --experimental-test-coverage --test-coverage-lines=90 --test-coverage-exclude='scripts/test/**' scripts/test/*.test.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.312"
+  }
+}

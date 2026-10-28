@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "allow": [
+      "Skill(analyze-changes)",
+      "Skill(find-coverage-gaps)",
+      "Skill(write-backend-tests)",
+      "Skill(write-frontend-tests)",
+      "Skill(run-tests)",
+      "Edit(backend/tests/**/*.ts)",
+      "Edit(frontend/src/**/*.test.ts)",
+      "Edit(frontend/src/**/*.test.tsx)",
+      "Edit(frontend/src/test/**)",
+      "Bash(.github/test-agent/bin/run-tests.sh:*)"
+    ],
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Edit(.github/**)",
+      "Edit(.claude/**)",
+      "WebFetch",
+      "WebSearch"
+    ]
+  }
+}
