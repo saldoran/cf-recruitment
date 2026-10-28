@@ -36,8 +36,8 @@
   },
   "limits": {
     "pr": { "maxTargets": 8, "maxBudgetUsd": 1, "maxTurns": 60 },
-    "sweep": { "maxTargets": 12, "maxBudgetUsd": 3, "maxTurns": 150 },
-    "maxPatchFiles": 15,
+    "sweep": { "maxTargets": 20, "maxBudgetUsd": 3, "maxTurns": 200 },
+    "maxPatchFiles": 25,
     "maxTestFileBytes": 60000
   }
 }
