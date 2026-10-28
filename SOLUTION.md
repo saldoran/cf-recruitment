@@ -35,7 +35,7 @@ flowchart LR
 | Code under test reads the key from the agent's environment | The runner script executes Vitest and `tsc` in a `node` container pinned by digest, with `--network none`, without the agent's environment, and with `.git`, `.github` and `.claude` mounted read-only. |
 | The agent changes something other than tests | A separate guard step, run from the trusted copy, rejects files outside the test globs, deletions, symlinks, focused or skipped tests, `child_process`, `@ts-nocheck`, key-shaped strings and oversized patches. |
 | Untested or failing tests get committed | The commit job runs only after verify passed for every package. It repeats the guard from the base branch and refuses to push if the branch moved. |
-| The agent triggers itself forever | Pushes use `GITHUB_TOKEN`, which starts no workflow runs. Agent commits carry a `Unit-Test-Agent:` trailer, and the plan job skips them. `concurrency` cancels outdated runs. |
+| The agent triggers itself forever | Pushes use `GITHUB_TOKEN`, and GitHub holds the pull request runs of such a push until a maintainer approves them. Agent commits carry a `Unit-Test-Agent:` trailer, so an approved agent run stops at the plan job. `concurrency` cancels outdated runs. |
 | Agent text in the comment pings people or hides links | Agent strings are flattened and escaped, mentions and URLs are defused, and key-shaped strings are redacted. |
 | Supply chain | Actions are pinned to commit SHAs. Claude Code is installed from a lockfile with integrity hashes and `--ignore-scripts`. Dependabot keeps both current. |
 
@@ -47,7 +47,7 @@ The workflow grants no permissions by default; each job requests its own. The co
 - `--max-turns` and `--max-budget-usd` cap each run (`config.json`: 60 turns and $1 for pull requests, 200 turns and $3 for sweeps).
 - A run that ends without a result or bills a non-Haiku model fails the job, and nothing is committed. The first sweep found this gap: the agent never started, yet the run stayed green ([#2](https://github.com/saldoran/cf-recruitment/pull/2) fixed it).
 - The agent makes at most three fix attempts per test file and reports a target as skipped instead of looping.
-- After pushing tests, the commit job sets a commit status and dispatches CI, so the bot commit gets check results of its own.
+- After pushing tests, the commit job sets a commit status and dispatches CI, so the bot commit gets check results without waiting for an approval.
 
 ## Running the workflow
 
@@ -114,6 +114,12 @@ The feature adds `DELETE /api/todos/completed` and a "Clear completed" button, a
 3. **Guard and verify.** The guard accepted six test files. Backend: 79 tests passed, typecheck passed, changed lines covered 4/4. Frontend: 86 tests passed, typecheck passed, changed lines covered 16/16.
 4. **Commit and report.** Commit [`7448b95`](https://github.com/saldoran/cf-recruitment/commit/7448b95018e18807254578d2516385a0bcc5eb52) landed on the branch with the status `unit-test-agent / verify`. The [comment](https://github.com/saldoran/cf-recruitment/pull/4#issuecomment-6481081307) lists every decision with its reason, the test results, the skills and the cost: $0.006 for the backend, $0.014 for the frontend.
 
+### Pull request [#6](https://github.com/saldoran/cf-recruitment/pull/6): task counts
+
+A smaller, backend-only change adds `GET /api/todos/stats`. The agent updated `repository.test.ts` and `router.test.ts`: changed lines covered went from 1/3 to 3/3, all 79 backend tests passed, and the run cost $0.006. The commit job dispatched CI for the bot commit, and CI passed. Approving the runs GitHub held for the bot commits of #4 and #6 ran CI on them once more, while the agent run stopped at the plan job because of the trailer, leaving the comments as they were.
+
+#4 and #6 stay open as examples. They change the same files, so merging one would put the other in conflict.
+
 ### Coverage sweep
 
 The [sweep run](https://github.com/saldoran/cf-recruitment/actions/runs/40770405198) covered the code that had no tests, and [#3](https://github.com/saldoran/cf-recruitment/pull/3) merged the result:
@@ -135,7 +141,7 @@ The workflow run on #3 also shows the loop guard at work: the head commit came f
 ## Limitations
 
 - GitHub runs the workflow file from the pull request branch, so a collaborator can edit the workflow itself.
-- Bot commits are authored by `github-actions[bot]` and rely on a dispatched CI run, not on the pull request event.
+- The pull request runs of a bot commit wait for a maintainer's approval. The dispatched CI run gives the commit results meanwhile, but GitHub does not list it among the pull request's checks.
 - Pull requests from forks get CI but no agent run.
 - The guard checks structure, not meaning: a passing test can still be shallow.
 - A large pull request gets at most eight targets per package; the comment lists the rest as not analysed.

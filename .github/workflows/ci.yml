@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-  # The unit test agent dispatches this workflow after it pushes tests, because pushes made with
-  # GITHUB_TOKEN start no workflow runs.
+  # The unit test agent dispatches this workflow after it pushes tests: GitHub holds the
+  # pull_request runs of a bot push until a maintainer approves them.
   workflow_dispatch:
 
 permissions:
