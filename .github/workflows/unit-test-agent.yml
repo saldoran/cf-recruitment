@@ -171,8 +171,10 @@ jobs:
           ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ env.AGENT_MODEL }}
           ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ env.AGENT_MODEL }}
           CLAUDE_CODE_SUBAGENT_MODEL: ${{ env.AGENT_MODEL }}
+          # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB stays off: on Linux it needs bubblewrap, whose isolation
+          # would also cut off the Docker CLI the test runner uses. Code under test never sees this
+          # environment because it runs in the sandbox container.
           CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1'
-          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
           DISABLE_AUTOUPDATER: '1'
           TEST_AGENT_SANDBOX: docker

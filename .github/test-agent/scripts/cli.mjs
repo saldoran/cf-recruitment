@@ -142,10 +142,14 @@ function guard(options, config) {
 function transcript(options) {
   const input = requireOption(options, 'input')
   const summary = summarizeTranscript(existsSync(input) ? readFileSync(input, 'utf8').split('\n') : [])
-  writeJson(requireOption(options, 'out'), { ...summary, exitCode: Number(options['exit-code'] ?? 0) })
+  const exitCode = Number(options['exit-code'] ?? 0)
+  writeJson(requireOption(options, 'out'), { ...summary, exitCode })
+  const problems = []
   const foreign = nonHaikuModels(summary.models)
-  if (foreign.length > 0) {
-    console.error(`Non-Haiku models were used: ${foreign.join(', ')}`)
+  if (foreign.length > 0) problems.push(`Non-Haiku models were used: ${foreign.join(', ')}`)
+  if (summary.status !== 'success') problems.push(`The agent did not finish: ${summary.status} (exit code ${exitCode})`)
+  if (problems.length > 0) {
+    console.error(problems.join('\n'))
     process.exitCode = 1
   }
 }
