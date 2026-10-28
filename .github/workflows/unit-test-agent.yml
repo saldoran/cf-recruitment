@@ -295,6 +295,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
+      actions: write
       contents: write
       statuses: write
     env:
@@ -347,14 +348,17 @@ jobs:
           if [ "$MODE" = sweep ]; then
             branch="test-agent/sweep-$GITHUB_RUN_ID"
             git push --quiet origin "HEAD:refs/heads/$branch"
+            gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$branch" || echo "::warning::Could not start CI for $branch"
             compare="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$GITHUB_REF_NAME...$branch?expand=1"
             node -e 'console.log(JSON.stringify({ committed: true, sha: process.argv[1], url: process.argv[2], branch: process.argv[3], compareUrl: process.argv[4] }))' \
               "$sha" "$url" "$branch" "$compare" > "$RUNNER_TEMP/commit/commit.json"
           else
-            # Pushes made with GITHUB_TOKEN start no new workflow runs, so the agent cannot trigger itself.
+            # Pushes made with GITHUB_TOKEN start no workflow runs, so the agent cannot trigger itself.
+            # CI is dispatched explicitly so the new commit gets its own check results.
             git push --quiet origin "HEAD:refs/heads/$HEAD_REF"
             gh api "repos/$GITHUB_REPOSITORY/statuses/$sha" -f state=success -f context='unit-test-agent / verify' \
               -f description='Tests written by the agent passed in CI' -f target_url="$RUN_URL" > /dev/null
+            gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$HEAD_REF" || echo "::warning::Could not start CI for $HEAD_REF"
             node -e 'console.log(JSON.stringify({ committed: true, sha: process.argv[1], url: process.argv[2] }))' \
               "$sha" "$url" > "$RUNNER_TEMP/commit/commit.json"
           fi
