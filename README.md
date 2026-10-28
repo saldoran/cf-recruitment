@@ -134,3 +134,7 @@ Coverage — `backend/coverage/index.html`:
 ```sh
 npm run test:coverage
 ```
+
+## Unit test agent
+
+Pull requests that change backend or frontend code run a Claude Code agent that writes the missing unit tests, verifies them in CI and reports in the pull request. [SOLUTION.md](SOLUTION.md) describes how it works and how to run it.
