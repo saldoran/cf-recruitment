@@ -5,7 +5,7 @@ import { createTodosRouter } from '../src/features/todos/router.ts';
 import { todo } from './fixture.ts';
 
 function setup() {
-  const repository = { list: vi.fn().mockResolvedValue([todo]), create: vi.fn().mockResolvedValue(todo), get: vi.fn(), update: vi.fn(), delete: vi.fn() };
+  const repository = { list: vi.fn().mockResolvedValue([todo]), create: vi.fn().mockResolvedValue(todo), get: vi.fn(), update: vi.fn(), delete: vi.fn(), stats: vi.fn().mockResolvedValue({ total: 2, completed: 1, open: 1 }) };
   const app = express();
   app.use(express.json());
   app.use('/api/todos', createTodosRouter(repository));
@@ -32,6 +32,14 @@ it.each([{ title: '  ' }, { title: 'x'.repeat(121) }, { title: 'Task', priority:
     expect(repository.create).not.toHaveBeenCalled();
   },
 );
+it('returns stats from the repository instead of parsing "stats" as an ID', async () => {
+  const { app, repository } = setup();
+  const response = await request(app).get('/api/todos/stats');
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({ total: 2, completed: 1, open: 1 });
+  expect(repository.stats).toHaveBeenCalledOnce();
+  expect(repository.get).not.toHaveBeenCalled();
+});
 it('returns a task by ID and 404 for a missing task', async () => {
   const { app, repository } = setup();
   repository.get.mockResolvedValueOnce(todo).mockResolvedValueOnce(null);
