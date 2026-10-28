@@ -32,3 +32,45 @@ it.each([{ title: '  ' }, { title: 'x'.repeat(121) }, { title: 'Task', priority:
     expect(repository.create).not.toHaveBeenCalled();
   },
 );
+it('returns a task by ID and 404 for a missing task', async () => {
+  const { app, repository } = setup();
+  repository.get.mockResolvedValueOnce(todo).mockResolvedValueOnce(null);
+  const found = await request(app).get('/api/todos/1');
+  expect(found.status).toBe(200);
+  expect(found.body).toEqual(todo);
+  expect(repository.get).toHaveBeenCalledWith(1);
+  const missing = await request(app).get('/api/todos/2');
+  expect(missing.status).toBe(404);
+  expect(missing.body).toEqual({ detail: 'Task not found.' });
+});
+it('rejects a task ID that is not a positive integer without calling the repository', async () => {
+  const { app, repository } = setup();
+  expect((await request(app).get('/api/todos/abc')).status).toBe(422);
+  expect((await request(app).patch('/api/todos/0').send({ completed: true })).status).toBe(422);
+  expect((await request(app).delete('/api/todos/-1')).status).toBe(422);
+  expect(repository.get).not.toHaveBeenCalled();
+  expect(repository.update).not.toHaveBeenCalled();
+  expect(repository.delete).not.toHaveBeenCalled();
+});
+it('updates a task and rejects invalid or empty patches', async () => {
+  const { app, repository } = setup();
+  repository.update.mockResolvedValueOnce({ ...todo, completed: true }).mockResolvedValueOnce(null);
+  const response = await request(app).patch('/api/todos/1').send({ completed: true });
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({ ...todo, completed: true });
+  expect(repository.update).toHaveBeenCalledWith(1, { completed: true });
+  expect((await request(app).patch('/api/todos/2').send({ completed: true })).status).toBe(404);
+  expect((await request(app).patch('/api/todos/1').send({})).status).toBe(422);
+  expect((await request(app).patch('/api/todos/1').send({ id: 5 })).status).toBe(422);
+  expect(repository.update).toHaveBeenCalledTimes(2);
+});
+it('deletes a task with 204 and returns 404 for a missing task', async () => {
+  const { app, repository } = setup();
+  repository.delete.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+  const deleted = await request(app).delete('/api/todos/1');
+  expect(deleted.status).toBe(204);
+  expect(repository.delete).toHaveBeenCalledWith(1);
+  const missing = await request(app).delete('/api/todos/2');
+  expect(missing.status).toBe(404);
+  expect(missing.body).toEqual({ detail: 'Task not found.' });
+});
