@@ -1,0 +1,407 @@
+name: Unit test agent
+
+# Pull requests: the agent reads the diff, decides which changed files need tests, writes them,
+# and the workflow verifies, commits and reports the result in the pull request.
+# Manual runs (sweep): the agent covers the least tested files and pushes a branch for review.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - backend/src/**
+      - backend/tests/**
+      - frontend/src/**
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: Packages to sweep for missing tests
+        type: choice
+        options: ['backend,frontend', backend, frontend]
+        default: 'backend,frontend'
+
+permissions: {}
+
+concurrency:
+  group: unit-test-agent-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '24'
+  # The only model the agent may use. The transcript check fails the run if any other model is billed.
+  AGENT_MODEL: claude-haiku-5-5
+  # Code from the pull request runs in this image without network access while the agent holds the API key.
+  SANDBOX_IMAGE: node:24-bookworm-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c
+  CLI: .github/test-agent/scripts/cli.mjs
+
+jobs:
+  plan:
+    name: Plan
+    # Pull requests from forks never get secrets, so the agent only runs for branches of this repository.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       !github.event.pull_request.draft &&
+       !contains(github.event.pull_request.labels.*.name, 'skip-test-agent'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+      agent-packages: ${{ steps.plan.outputs.agent-packages }}
+      verify-packages: ${{ steps.plan.outputs.verify-packages }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Select the mode and packages
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SWEEP_PACKAGES: ${{ inputs.packages }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ]; then
+            echo "mode=sweep" >> "$GITHUB_OUTPUT"
+            echo "packages=$(node -p 'JSON.stringify(process.argv[1].split(","))' "$SWEEP_PACKAGES")" >> "$GITHUB_OUTPUT"
+          elif git log -1 --format=%B "$HEAD_SHA" | grep -q '^Unit-Test-Agent:'; then
+            # The head commit is the agent's own work: never analyse it again.
+            echo "mode=skip" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=pr" >> "$GITHUB_OUTPUT"
+            node "$CLI" packages --base "$BASE_SHA" --head "$HEAD_SHA"
+          fi
+      - name: Measure coverage before the agent
+        if: steps.mode.outputs.mode != 'skip'
+        env:
+          PACKAGES: ${{ steps.mode.outputs.packages }}
+        run: |
+          for package in $(node -p 'JSON.parse(process.argv[1]).join(" ")' "$PACKAGES"); do
+            case "$package" in backend | frontend) ;; *) echo "::error::Unexpected package $package"; exit 1 ;; esac
+            (cd "$package" && npm ci --no-audit --no-fund && npx vitest run --coverage --coverage.reportOnFailure) ||
+              echo "::warning::Tests failed in $package before the agent ran"
+            mkdir -p "$RUNNER_TEMP/coverage/$package"
+            cp "$package/coverage/lcov.info" "$package/coverage/coverage-summary.json" "$RUNNER_TEMP/coverage/$package/" || true
+          done
+      - name: Build the manifest
+        id: plan
+        if: steps.mode.outputs.mode != 'skip'
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SWEEP_PACKAGES: ${{ inputs.packages }}
+        run: |
+          if [ "$MODE" = sweep ]; then
+            node "$CLI" plan --mode sweep --packages "$SWEEP_PACKAGES" --coverage-dir "$RUNNER_TEMP/coverage" --out "$RUNNER_TEMP/plan"
+          else
+            node "$CLI" plan --mode pr --base "$BASE_SHA" --head "$HEAD_SHA" --coverage-dir "$RUNNER_TEMP/coverage" --out "$RUNNER_TEMP/plan"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.mode.outputs.mode != 'skip'
+        with:
+          name: plan
+          path: ${{ runner.temp }}/plan
+          retention-days: 14
+
+  agent:
+    name: Agent (${{ matrix.package }})
+    needs: plan
+    if: needs.plan.outputs.agent-packages != '' && needs.plan.outputs.agent-packages != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.plan.outputs.agent-packages) }}
+    env:
+      PACKAGE: ${{ matrix.package }}
+      MODE: ${{ needs.plan.outputs.mode }}
+    steps:
+      - name: Check the package name
+        run: case "$PACKAGE" in backend | frontend) ;; *) echo "::error::Unexpected package"; exit 1 ;; esac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Use the agent configuration from the base branch
+        env:
+          TRUSTED_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+        run: |
+          # A pull request may edit the agent, its skills, its tools or add CLAUDE.md files.
+          # The agent always runs with the reviewed versions from the base branch.
+          rm -rf .claude .github/test-agent
+          git checkout "$TRUSTED_SHA" -- .claude .github/test-agent
+          find . -path ./node_modules -prune -o -type f \( -name CLAUDE.md -o -name CLAUDE.local.md \) -print -exec rm -f {} +
+          mkdir -p "$RUNNER_TEMP/trusted" "$RUNNER_TEMP/agent"
+          cp -R .github/test-agent "$RUNNER_TEMP/trusted/"
+          # Commit locally so the guard sees only the agent's changes.
+          git add --all
+          git -c user.name=unit-test-agent -c user.email=unit-test-agent@localhost commit --quiet --no-verify --allow-empty -m 'Agent workspace'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plan
+          path: ${{ runner.temp }}/plan
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Claude Code from the lockfile
+        run: |
+          mkdir -p "$RUNNER_TEMP/claude-code"
+          cp "$RUNNER_TEMP/trusted/test-agent/package.json" "$RUNNER_TEMP/trusted/test-agent/package-lock.json" "$RUNNER_TEMP/claude-code/"
+          npm ci --prefix "$RUNNER_TEMP/claude-code" --ignore-scripts --no-audit --no-fund
+      - name: Install package dependencies in the sandbox
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" --env HOME=/tmp \
+            --volume "$PWD:/repo" --workdir "/repo/$PACKAGE" "$SANDBOX_IMAGE" npm ci --no-audit --no-fund
+      - name: Run the agent
+        id: agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ env.AGENT_MODEL }}
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ env.AGENT_MODEL }}
+          ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ env.AGENT_MODEL }}
+          ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ env.AGENT_MODEL }}
+          CLAUDE_CODE_SUBAGENT_MODEL: ${{ env.AGENT_MODEL }}
+          CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1'
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+          DISABLE_AUTOUPDATER: '1'
+          TEST_AGENT_SANDBOX: docker
+          TEST_AGENT_IMAGE: ${{ env.SANDBOX_IMAGE }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then echo "::error::The ANTHROPIC_API_KEY secret is not set"; exit 1; fi
+          export CLAUDE_CONFIG_DIR="$RUNNER_TEMP/claude-config"
+          read -r budget turns < <(node -p 'const l = require(process.argv[1]).limits[process.argv[2]]; `${l.maxBudgetUsd} ${l.maxTurns}`' \
+            "$RUNNER_TEMP/trusted/test-agent/config.json" "$MODE")
+          prompt=$(printf 'Mode: %s\nPackage: %s\nManifest: %s\nWork through the targets in the manifest, then return the report.' \
+            "$MODE" "$PACKAGE" "$RUNNER_TEMP/plan/manifest-$PACKAGE.json")
+          set +e
+          timeout 25m node "$RUNNER_TEMP/claude-code/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs" \
+            -p "$prompt" --agent unit-test-agent --model "$AGENT_MODEL" \
+            --tools Read,Glob,Grep,Edit,Write,Bash,Skill --setting-sources project \
+            --settings .github/test-agent/agent-settings.json --permission-mode dontAsk \
+            --max-budget-usd "$budget" --max-turns "$turns" --no-session-persistence \
+            --add-dir "$RUNNER_TEMP/plan" --json-schema "$(cat .github/test-agent/report.schema.json)" \
+            --output-format stream-json --verbose < /dev/null > "$RUNNER_TEMP/agent/transcript.jsonl"
+          echo "exit-code=$?" >> "$GITHUB_OUTPUT"
+      - name: Format the frontend tests
+        if: always() && steps.agent.outcome == 'success' && env.PACKAGE == 'frontend'
+        run: |
+          docker run --rm --network none --user "$(id -u):$(id -g)" --env HOME=/tmp \
+            --volume "$PWD:/repo" --volume "$PWD/.git:/repo/.git:ro" --workdir /repo/frontend "$SANDBOX_IMAGE" \
+            npx --no-install prettier --write --log-level warn --no-error-on-unmatched-pattern \
+            'src/**/*.test.ts' 'src/**/*.test.tsx' 'src/test/**/*.{ts,tsx}'
+      - name: Check the models and summarize the run
+        if: always() && steps.agent.outcome == 'success'
+        env:
+          EXIT_CODE: ${{ steps.agent.outputs.exit-code }}
+        run: node "$RUNNER_TEMP/trusted/test-agent/scripts/cli.mjs" transcript --input "$RUNNER_TEMP/agent/transcript.jsonl" --exit-code "$EXIT_CODE" --out "$RUNNER_TEMP/agent/agent.json"
+      - name: Check that the agent changed only test files
+        if: always() && steps.agent.outcome == 'success'
+        run: node "$RUNNER_TEMP/trusted/test-agent/scripts/cli.mjs" guard --packages "$PACKAGE" --out "$RUNNER_TEMP/agent/guard.json" --patch "$RUNNER_TEMP/agent/agent.patch"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: agent-${{ matrix.package }}
+          path: ${{ runner.temp }}/agent
+          if-no-files-found: ignore
+          retention-days: 14
+
+  verify:
+    name: Verify (${{ matrix.package }})
+    needs: [plan, agent]
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      needs.plan.outputs.verify-packages != '' && needs.plan.outputs.verify-packages != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.plan.outputs.verify-packages) }}
+    env:
+      PACKAGE: ${{ matrix.package }}
+    steps:
+      - name: Check the package name
+        run: case "$PACKAGE" in backend | frontend) ;; *) echo "::error::Unexpected package"; exit 1 ;; esac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plan
+          path: ${{ runner.temp }}/plan
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          name: agent-${{ matrix.package }}
+          path: ${{ runner.temp }}/agent
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Apply the agent's tests
+        run: |
+          if [ -s "$RUNNER_TEMP/agent/agent.patch" ] && node -e 'process.exit(require(process.argv[1]).ok ? 0 : 1)' "$RUNNER_TEMP/agent/guard.json"; then
+            git apply --index "$RUNNER_TEMP/agent/agent.patch"
+            node "$CLI" guard --packages "$PACKAGE" --out "$RUNNER_TEMP/verify/guard.json"
+          fi
+      - name: Install dependencies
+        working-directory: ${{ matrix.package }}
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck
+        id: typecheck
+        continue-on-error: true
+        working-directory: ${{ matrix.package }}
+        run: npm run typecheck
+      - name: Run the tests with coverage
+        id: tests
+        continue-on-error: true
+        working-directory: ${{ matrix.package }}
+        run: npx vitest run --coverage --coverage.reportOnFailure --reporter=default --reporter=json --outputFile.json=vitest-results.json
+      - name: Summarize the verification
+        env:
+          TYPECHECK: ${{ steps.typecheck.outcome == 'success' && 'passed' || 'failed' }}
+          TESTS_EXIT: ${{ steps.tests.outcome == 'success' && '0' || '1' }}
+        run: |
+          node "$CLI" verify-summary --package "$PACKAGE" --manifest "$RUNNER_TEMP/plan/manifest.json" --package-dir "$PACKAGE" \
+            --typecheck "$TYPECHECK" --tests-exit "$TESTS_EXIT" --out "$RUNNER_TEMP/verify/verify.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verify-${{ matrix.package }}
+          path: ${{ runner.temp }}/verify
+          retention-days: 14
+      - name: Fail when verification failed
+        run: |
+          node -e 'process.exit(require(process.argv[1]).status === "passed" ? 0 : 1)' "$RUNNER_TEMP/verify/verify.json"
+
+  commit:
+    name: Commit the tests
+    needs: [plan, agent, verify]
+    if: always() && needs.plan.result == 'success' && needs.agent.result == 'success' && needs.verify.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      statuses: write
+    env:
+      # This job holds a write token, so its checks run from the base branch, not from the pull request.
+      CLI: .trusted/.github/test-agent/scripts/cli.mjs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: .trusted
+          sparse-checkout: .github/test-agent
+          persist-credentials: false
+      - name: Keep the trusted tools out of the commit
+        run: echo '.trusted/' >> .git/info/exclude
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/artifacts
+      - name: Decide whether to commit
+        id: status
+        run: node "$CLI" status --manifest "$RUNNER_TEMP/artifacts/plan/manifest.json" --artifacts "$RUNNER_TEMP/artifacts"
+      - name: Commit and push
+        if: steps.status.outputs.status == 'ready'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ needs.plan.outputs.mode }}
+          PACKAGES: ${{ needs.plan.outputs.agent-packages }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/commit"
+          if [ "$MODE" = pr ] && [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ]; then
+            echo '{"committed": false, "reason": "the branch moved while the agent was running; push again to rerun"}' > "$RUNNER_TEMP/commit/commit.json"
+            exit 0
+          fi
+          for patch in "$RUNNER_TEMP"/artifacts/agent-*/agent.patch; do
+            if [ -s "$patch" ]; then git apply --index "$patch"; fi
+          done
+          node "$CLI" guard --packages "$(node -p 'JSON.parse(process.argv[1]).join(",")' "$PACKAGES")" --out "$RUNNER_TEMP/commit/guard.json"
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit --quiet --no-verify -m 'test: add unit tests written by the unit test agent' -m "Unit-Test-Agent: $RUN_URL"
+          sha=$(git rev-parse HEAD)
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$sha"
+          if [ "$MODE" = sweep ]; then
+            branch="test-agent/sweep-$GITHUB_RUN_ID"
+            git push --quiet origin "HEAD:refs/heads/$branch"
+            compare="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$GITHUB_REF_NAME...$branch?expand=1"
+            node -e 'console.log(JSON.stringify({ committed: true, sha: process.argv[1], url: process.argv[2], branch: process.argv[3], compareUrl: process.argv[4] }))' \
+              "$sha" "$url" "$branch" "$compare" > "$RUNNER_TEMP/commit/commit.json"
+          else
+            # Pushes made with GITHUB_TOKEN start no new workflow runs, so the agent cannot trigger itself.
+            git push --quiet origin "HEAD:refs/heads/$HEAD_REF"
+            gh api "repos/$GITHUB_REPOSITORY/statuses/$sha" -f state=success -f context='unit-test-agent / verify' \
+              -f description='Tests written by the agent passed in CI' -f target_url="$RUN_URL" > /dev/null
+            node -e 'console.log(JSON.stringify({ committed: true, sha: process.argv[1], url: process.argv[2] }))' \
+              "$sha" "$url" > "$RUNNER_TEMP/commit/commit.json"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: commit
+          path: ${{ runner.temp }}/commit
+          if-no-files-found: ignore
+          retention-days: 14
+
+  report:
+    name: Report
+    needs: [plan, agent, verify, commit]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'skip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          sparse-checkout: .github/test-agent
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/artifacts
+      - name: Render the report
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          node "$CLI" report --manifest "$RUNNER_TEMP/artifacts/plan/manifest.json" --artifacts "$RUNNER_TEMP/artifacts" \
+            --commit "$RUNNER_TEMP/artifacts/commit/commit.json" --run-url "$RUN_URL" --out "$RUNNER_TEMP/report.md"
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Post or update the pull request comment
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- unit-test-agent -->"))) | .id' | head -n 1)
+          if [ -n "$id" ]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@"$RUNNER_TEMP/report.md" > /dev/null
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$RUNNER_TEMP/report.md" > /dev/null
+          fi
