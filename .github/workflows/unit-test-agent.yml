@@ -353,8 +353,9 @@ jobs:
             node -e 'console.log(JSON.stringify({ committed: true, sha: process.argv[1], url: process.argv[2], branch: process.argv[3], compareUrl: process.argv[4] }))' \
               "$sha" "$url" "$branch" "$compare" > "$RUNNER_TEMP/commit/commit.json"
           else
-            # Pushes made with GITHUB_TOKEN start no workflow runs, so the agent cannot trigger itself.
-            # CI is dispatched explicitly so the new commit gets its own check results.
+            # GitHub holds the pull_request runs of this push until a maintainer approves them, and an
+            # approved agent run stops at the Unit-Test-Agent trailer. CI is dispatched explicitly so
+            # the new commit gets check results right away.
             git push --quiet origin "HEAD:refs/heads/$HEAD_REF"
             gh api "repos/$GITHUB_REPOSITORY/statuses/$sha" -f state=success -f context='unit-test-agent / verify' \
               -f description='Tests written by the agent passed in CI' -f target_url="$RUN_URL" > /dev/null
